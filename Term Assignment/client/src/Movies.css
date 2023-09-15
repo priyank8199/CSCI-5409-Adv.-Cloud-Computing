@@ -1,0 +1,14 @@
+
+.different-card .ant-card-body p {
+    font-weight: bold;
+  }
+
+  .different-card {
+    border: 2px solid #000;
+    padding: 10px;
+  }
+
+  .different-card p {
+    font-size: 16px;
+  }
+  

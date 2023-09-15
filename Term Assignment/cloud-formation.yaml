@@ -1,0 +1,620 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Cloud Formation for Movie Ticket Booking using AWS Lambda, DynamoDB, SQS, SNS, API Gateway and Ec2 Instance"
+
+Parameters:
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - m3.medium
+      - m3.large
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+Resources:
+  MovieTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Movie
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  SQSTicketQueue:
+    Type: "AWS::SQS::Queue"
+  QueuePolicy:
+    Type: "AWS::SQS::QueuePolicy"
+    Properties:
+      Queues:
+        - !Ref SQSTicketQueue
+      PolicyDocument:
+        Version: 2012-10-17
+        Id: PolicyForQueue
+        Statement:
+          - Sid: AllowMessagesToQueue
+            Effect: Allow
+            Principal:
+              AWS: "arn:aws:iam::739097579447:role/LabRole"
+            Action: "SQS:*"
+            Resource: !GetAtt SQSTicketQueue.Arn
+
+  TickeBookSNSTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      DisplayName: ticketbooksnstopic
+      TopicName: ticketBookingConfirmation
+
+  TickeBookSNSTopicEmailSubscription:
+    Type: "AWS::SNS::Subscription"
+    Properties:
+      TopicArn: !Ref TickeBookSNSTopic
+      Protocol: email
+      Endpoint: pr371749@dal.ca
+
+  RestApi:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Name: movieTicketRESTAPI
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  SendTicketConfirmationLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: SendTicketConfirmationLambda
+      Runtime: nodejs14.x
+      Role: arn:aws:iam::739097579447:role/LabRole
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          AWS.config.update({ region: 'us-east-1' });
+          const sqs = new AWS.SQS();
+          const sns = new AWS.SNS();
+
+              const sqsQueueURL = process.env.QueueUrl;
+              const snsTopicARN = process.env.SnsTopicArn;
+
+              exports.handler = async (event) => {
+                console.log(event);
+                let variable = event.Records[0].body;
+                variable = JSON.parse(variable);
+                console.log(variable);
+                console.log("abc", event.Records[0].body);
+                try {
+                  const params = {
+                    QueueUrl: sqsQueueURL,
+                    MaxNumberOfMessages: 10, 
+                    WaitTimeSeconds: 5,
+                  };
+
+                  const data = await sqs.receiveMessage(params).promise();
+
+                  if (true) {
+                    const snsPromises = [];
+                    
+                    const title = variable.title;
+                    console.log(title);
+                    console.log(title);
+                    const showTime = variable.showTime;
+                    const quantity = variable.quantity;
+                    const total = variable.total;
+                    
+                    const emailMessage = `Hello, Your ticket for movie ${title} for ${showTime} has been booked successfully. You have booked ${quantity} tickets of price $${total}.`;
+
+                    
+                    const snsParams = {
+                      TopicArn: snsTopicARN,
+                      Message: JSON.stringify(emailMessage),
+                    };
+
+                    snsPromises.push(sns.publish(snsParams).promise());
+                  
+                    await Promise.all(snsPromises);
+
+                    return {
+                      statusCode: 200,
+                      body: JSON.stringify({ message: 'Messages sent to SNS topic successfully' }),
+                    };
+                  } else {
+                    return {
+                      statusCode: 200,
+                      body: JSON.stringify({ message: 'No messages available in the SQS queue' }),
+                    };
+                  }
+                } catch (error) {
+                  console.error('Error processing SQS messages:', error);
+                  return {
+                    statusCode: 500,
+                    body: JSON.stringify({ error: 'Error processing SQS messages' }),
+                  };
+                }
+              };
+
+      Environment:
+        Variables:
+          QueueUrl: !GetAtt SQSTicketQueue.QueueUrl
+          SnsTopicArn: !Ref TickeBookSNSTopic
+
+  SQSQueueEventSourceMapping:
+    Type: "AWS::Lambda::EventSourceMapping"
+    Properties:
+      BatchSize: 1
+      EventSourceArn: !GetAtt SQSTicketQueue.Arn
+      FunctionName: !GetAtt SendTicketConfirmationLambdaFunction.Arn
+
+  GetAllMoviesLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: GetAllMoviesLambda
+      Runtime: nodejs14.x
+      Role: arn:aws:iam::739097579447:role/LabRole
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const dynamoDB = new AWS.DynamoDB.DocumentClient();
+          const tableName = 'Movie';
+
+            exports.handler = async (event, context) => {
+              try {
+              const movies = await getAllMoviesFromDynamoDB();
+              return {
+                statusCode: 200,
+                headers: {
+                  "Access-Control-Allow-Headers" : "Content-Type",
+                  "Access-Control-Allow-Origin": "*",
+                  "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+                  },
+                body: JSON.stringify(movies),
+              };
+            } catch (error) {
+              return {
+                statusCode: 500,
+                headers: {
+                  "Access-Control-Allow-Headers" : "Content-Type",
+                  "Access-Control-Allow-Origin": "*",
+                  "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+                  },
+                body: JSON.stringify({ error: 'Error getting all movies.' }),
+              };
+            }
+            };
+
+              async function getAllMoviesFromDynamoDB() {
+              const params = {
+              TableName: tableName,
+            };
+
+            try {
+              const result = await dynamoDB.scan(params).promise();
+              return result.Items;
+            } catch (error) {
+              console.error('Error getting all movies:', error);
+              throw error;
+            }
+              }
+
+  GetMoviesApiGatewayResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: allMovies
+
+  GetMoviesApiGatewayMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref GetMoviesApiGatewayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetAllMoviesLambdaFunction.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+            method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+        - StatusCode: "400"
+
+  GetAllMoviesOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ResourceId: !Ref GetMoviesApiGatewayResource
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          "application/json": '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+          - StatusCode: "400"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+            "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+            "method.response.header.Access-Control-Allow-Origin": "'*'"
+
+  GetMovieByIdLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: GetMovieByIdLambda
+      Runtime: nodejs14.x
+      Role: arn:aws:iam::739097579447:role/LabRole
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const dynamoDB = new AWS.DynamoDB.DocumentClient();
+          const tableName = 'Movie'; 
+
+              exports.handler = async (event, context) => {
+              console.log(event);
+            const requestBody = JSON.parse(event.body);
+            const {id} = requestBody;
+                 try {
+                  if (!id) {
+                    return {
+                      statusCode: 400,
+                      headers: {
+                          "Access-Control-Allow-Headers" : "Content-Type",
+                          "Access-Control-Allow-Origin": "*",
+                          "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+                          },
+                      body: JSON.stringify({ error: 'Missing request body' }),
+                    };
+                  }
+
+                  const movie = await getMovieById(id);
+                  console.log(movie);
+                  return {
+                    statusCode: 200,
+                    headers: {
+                      "Access-Control-Allow-Headers" : "Content-Type",
+                      "Access-Control-Allow-Origin": "*",
+                      "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+                      },
+                    body: JSON.stringify(movie),
+                  };
+                } catch (error) {
+                  console.error('Error:', error);
+                  return {
+                    statusCode: 500,
+                    headers: {
+                      "Access-Control-Allow-Headers" : "Content-Type",
+                      "Access-Control-Allow-Origin": "*",
+                      "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+                      },
+                    body: JSON.stringify({ error: 'Internal server error' }),
+                  };
+                }
+              };
+
+              async function getMovieById(movieId) {
+                const params = {
+                  TableName: tableName,
+                  Key: { id: movieId },
+                };
+
+                try {
+                  const result = await dynamoDB.get(params).promise();
+                  return result.Item;
+                } catch (error) {
+                  console.error('Error getting movie by ID:', error);
+                  throw error;
+                }
+              }
+
+  GetMoviesByIdApiGatewayResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: movie
+
+  GetMoviesByIdApiGatewayMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref GetMoviesByIdApiGatewayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetMovieByIdLambdaFunction.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+            method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+        - StatusCode: "400"
+
+  GetMoviesByIdOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ResourceId: !Ref GetMoviesByIdApiGatewayResource
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          "application/json": '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+          - StatusCode: "400"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+            "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+            "method.response.header.Access-Control-Allow-Origin": "'*'"
+
+  GenerateTicketReceiptLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: GenerateTicketReceiptLambda
+      Runtime: nodejs14.x
+      Role: arn:aws:iam::739097579447:role/LabRole
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const sqs = new AWS.SQS();
+          const queueUrl = process.env.QueueUrl; 
+
+          exports.handler = async (event) => {
+            try {
+              const requestBody = JSON.parse(event.body);
+              const { name, email, quantity, total, showTime, title } = requestBody;
+
+              // Create a message object that you want to push into the SQS queue
+              const message = {
+                name: name,
+                email: email,
+                quantity: quantity,
+                total: total,
+                showTime: showTime,
+                title: title,
+              };
+
+              const params = {
+                MessageBody: JSON.stringify(message),
+                QueueUrl: queueUrl,
+              };
+              
+              console.log(params);
+              // Push the message into the SQS queue
+              await sqs.sendMessage(params).promise();
+
+              return {
+                statusCode: 200,
+                headers: {
+                  "Access-Control-Allow-Headers" : "Content-Type",
+                  "Access-Control-Allow-Origin": "*",
+                  "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+                  },
+                body: JSON.stringify({ message: 'Message pushed to SQS queue successfully' }),
+              };
+            } catch (error) {
+              console.error('Error pushing message to SQS queue:', error);
+              return {
+                statusCode: 500,
+                headers: {
+                  "Access-Control-Allow-Headers" : "Content-Type",
+                  "Access-Control-Allow-Origin": "*",
+                  "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+                  },
+                body: JSON.stringify({ error: 'Error pushing message to SQS queue' }),
+              };
+            }
+          };
+
+      Environment:
+        Variables:
+          QueueUrl: !GetAtt SQSTicketQueue.QueueUrl
+
+  GenerateTicketReceiptGatewayResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: generateTicket
+
+  GenerateTicketReceiptApiGatewayMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref GenerateTicketReceiptGatewayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GenerateTicketReceiptLambdaFunction.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+            method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+        - StatusCode: "400"
+
+  GenerateTicketReciptOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ResourceId: !Ref GenerateTicketReceiptGatewayResource
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          "application/json": '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+          - StatusCode: "400"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+            "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+            "method.response.header.Access-Control-Allow-Origin": "'*'"
+
+  ApiGatewayDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn:
+      - GetMoviesApiGatewayMethod
+      - GetMoviesByIdApiGatewayMethod
+      - GenerateTicketReceiptApiGatewayMethod
+    Properties:
+      RestApiId: !Ref RestApi
+
+  ApiGatewayStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref ApiGatewayDeployment
+      StageName: production
+
+  GetAllMoviesLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref GetAllMoviesLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/POST/allMovies
+
+  GetMoviesByIdLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref GetMovieByIdLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/POST/movie
+
+  GenerateTicketReceiptLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref GenerateTicketReceiptLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/POST/generateTicket
+
+  EC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: ami-0f34c5ae932e6f0e4
+      KeyName: movieTicketBooking
+      SecurityGroups:
+        - !Ref EC2SecurityGroup
+      Tags:
+        - Key: Key
+          Value: Value
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo yum update -y
+          sudo yum install -y aws-cli
+          sudo yum install -y git
+
+
+  EC2SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: EC2 instance Security Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+
+Outputs:
+  # Export the URL of the created SQS queue to use in other CloudFormation stacks.
+
+  SQSQueueUrl:
+    Description: "URL of the created SQS queue"
+    Value: !Ref SQSTicketQueue
+    Export:
+      Name: "SQSQueueUrl"
+
+  # Export the ARN of the created SNS topic to use in other CloudFormation stacks.
+
+  SNSTopicArn:
+    Description: "ARN of the created SNS topic"
+    Value: !Ref TickeBookSNSTopic
+    Export:
+      Name: "SNSTopicArn"
+
+  # Output the EC2 instance ID and public IP address for information purposes.
+
+  InstanceId:
+    Description: Instance ID of the created EC2 instance
+    Value: !Ref EC2Instance
+  PublicIp:
+    Description: Public IP address of the created EC2 instance
+    Value: !GetAtt EC2Instance.PublicIp
+
+  # Export the API Gateway endpoint URL to use in other CloudFormation stacks.
+
+  ExportedApiEndpoint:
+    Description: "Exported API Gateway endpoint URL"
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/production"
+    Export:
+      Name: "ApiEndpointUrl"

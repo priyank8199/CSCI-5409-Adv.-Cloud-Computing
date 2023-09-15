@@ -1,0 +1,15 @@
+services:
+  Container1:
+    image: priyank8199/container1
+    container_name: container1
+    ports:
+      - 6000:6000
+    volumes:
+      - .:/app/filedata
+
+   
+  Container2:
+    image: priyank8199/container2
+    container_name: priyank-container2
+    volumes:
+      - .:/app/filedata
